@@ -825,7 +825,8 @@ def separate(
         BigShifts = 7,
         vocals_only = False,
         use_VOCFT = False,
-        output_format = "FLOAT"
+        output_format = "FLOAT",
+        chunk_size = 1000000
 ):
     global options
     options = {
@@ -841,6 +842,7 @@ def separate(
         "BigShifts": BigShifts,
         "vocals_only": vocals_only,
         "use_VOCFT": use_VOCFT,
-        "output_format": output_format
+        "output_format": output_format,
+        "chunk_size": chunk_size
     }
     predict_with_model(options)
