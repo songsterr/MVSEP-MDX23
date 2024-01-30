@@ -2,9 +2,9 @@
 
 if __name__ == '__main__':
     import os
-     
+    
     gpu_use = "0"
-
+    
     print('GPU use: {}'.format(gpu_use))
     os.environ["CUDA_VISIBLE_DEVICES"] = "{}".format(gpu_use)
 import warnings
@@ -17,7 +17,6 @@ import torch.nn as nn
 import os
 import argparse
 import soundfile as sf
-from demucs.states import load_model
 from demucs import pretrained
 from demucs.apply import apply_model
 import onnxruntime as ort
@@ -28,11 +27,7 @@ from scipy import signal
 import gc
 import yaml
 from ml_collections import ConfigDict
-import sys
-import math
-import pathlib
-import warnings
-from modules.tfc_tdf_v3 import TFC_TDF_net, STFT
+from modules.tfc_tdf_v3 import TFC_TDF_net
 from scipy.signal import resample_poly
 from modules.segm_models import Segm_Models_Net
 
@@ -51,7 +46,7 @@ class Conv_TDF_net_trim_model(nn.Module):
         out_c = self.dim_c * 4 if target_name == '*' else self.dim_c
         self.freq_pad = torch.zeros([1, out_c, self.n_bins - self.dim_f, self.dim_t]).to(device)
         self.n = L // 2
-
+    
     def stft(self, x):
         x = x.reshape([-1, self.chunk_size])
         x = torch.stft(x, n_fft=self.n_fft, hop_length=self.hop, window=self.window, center=True, return_complex=True)
@@ -59,7 +54,7 @@ class Conv_TDF_net_trim_model(nn.Module):
         x = x.permute([0, 3, 1, 2])
         x = x.reshape([-1, 2, 2, self.n_bins, self.dim_t]).reshape([-1, self.dim_c, self.n_bins, self.dim_t])
         return x[:, :, :self.dim_f]
-
+    
     def istft(self, x, freq_pad=None):
         freq_pad = self.freq_pad.repeat([x.shape[0], 1, 1, 1]) if freq_pad is None else freq_pad
         x = torch.cat([x, freq_pad], -2)
@@ -69,23 +64,23 @@ class Conv_TDF_net_trim_model(nn.Module):
         x = torch.view_as_complex(x)
         x = torch.istft(x, n_fft=self.n_fft, hop_length=self.hop, window=self.window, center=True)
         return x.reshape([-1, 2, self.chunk_size])
-
+    
     def forward(self, x):
         x = self.first_conv(x)
         x = x.transpose(-1, -2)
-
+        
         ds_outputs = []
         for i in range(self.n):
             x = self.ds_dense[i](x)
             ds_outputs.append(x)
             x = self.ds[i](x)
-
+        
         x = self.mid_dense(x)
         for i in range(self.n):
             x = self.us[i](x)
             x *= ds_outputs[-i - 1]
             x = self.us_dense[i](x)
-
+        
         x = x.transpose(-1, -2)
         x = self.final_conv(x)
         return x
@@ -105,7 +100,7 @@ def get_models(name, device, load=True, vocals_model_type=0):
             L=11,
             n_fft=6144
         )
-
+    
     return [model_vocals]
 
 def demix_base_mdxv3(model, mix, device):
@@ -117,30 +112,30 @@ def demix_base_mdxv3(model, mix, device):
         S = model.num_target_instruments
     except Exception as e:
         S = model.module.num_target_instruments
-
+    
     mdx_window_size = model.config.inference.dim_t * 2
     batch_size = 1
     C = model.config.audio.hop_length * (mdx_window_size - 1)
     H = C // N
     L = mix.shape[1]
     pad_size = H - (L - C) % H
-
+    
     mix = torch.cat([torch.zeros(2, C - H), mix, torch.zeros(2, pad_size + C - H)], 1)
     mix = mix.to(device)
     chunks = mix.unfold(1, C, H).transpose(0, 1)
     batches = [chunks[i : i + batch_size] for i in range(0, len(chunks), batch_size)]
-
-    X = torch.zeros(S, *mix.shape).to(device) if S > 1 else torch.zeros_like(mix) 
-
+    
+    X = torch.zeros(S, *mix.shape).to(device) if S > 1 else torch.zeros_like(mix)
+    
     with torch.cuda.amp.autocast():
         with torch.no_grad():
             cnt = 0
             for batch in batches:
-                 x = model(batch)
-                 for w in x:
+                x = model(batch)
+                for w in x:
                     X[..., cnt * H : cnt * H + C] += w
                     cnt += 1
-
+    
     estimated_sources = X[..., C - H:-(pad_size + C - H)] / N
     
     if S > 1:
@@ -156,16 +151,16 @@ def demix_full_mdx23c(mix, device, model):
         bigshifts = options["BigShifts"]
     shift_in_samples = mix.shape[1] // bigshifts
     shifts = [x * shift_in_samples for x in range(bigshifts)]
-
+    
     results = []
-
+    
     for shift in tqdm(shifts, position=0):
         shifted_mix = np.concatenate((mix[:, -shift:], mix[:, :-shift]), axis=-1)
         sources = demix_base_mdxv3(model, shifted_mix, device)["Vocals"]
         sources *= 1.0005168 # volume compensation
         restored_sources = np.concatenate((sources[..., shift:], sources[..., :shift]), axis=-1)
         results.append(restored_sources)
-
+    
     sources = np.mean(results, axis=0)
     
     return sources
@@ -183,7 +178,7 @@ def demix_wrapper(mix, device, models, infer_session, overlap=0.2, bigshifts=1):
         sources = demix(shifted_mix, device, models, infer_session, overlap) * 1.021 # volume compensation
         restored_sources = np.concatenate((sources[..., shift:], sources[..., :shift]), axis=-1)
         results.append(restored_sources)
-        
+    
     sources = np.mean(results, axis=0)
     
     return sources
@@ -207,25 +202,25 @@ def demix(mix, device, models, infer_session, overlap=0.2):
     pad = gen_size + trim - ((mix.shape[-1]) % gen_size)
     
     mixture = np.concatenate((np.zeros((2, trim), dtype='float32'), mix, np.zeros((2, pad), dtype='float32')), 1)
-
+    
     step = int((1 - overlap) * chunk_size)
     result = np.zeros((1, 2, mixture.shape[-1]), dtype=np.float32)
     divider = np.zeros((1, 2, mixture.shape[-1]), dtype=np.float32)
     total = 0
     total_chunks = (mixture.shape[-1] + step - 1) // step
-
+    
     for i in range(0, mixture.shape[-1], step):
         total += 1
         start = i
         end = min(i + chunk_size, mixture.shape[-1])
         chunk_size_actual = end - start
-
+        
         if overlap == 0:
             window = None
         else:
             window = np.hanning(chunk_size_actual)
             window = np.tile(window[None, None, :], (1, 2, 1))
-
+        
         mix_part_ = mixture[:, start:end]
         if end != i + chunk_size:
             pad_size = (i + chunk_size) - end
@@ -239,45 +234,45 @@ def demix(mix, device, models, infer_session, overlap=0.2):
             for mix_wave in mix_waves:
                 _ort = infer_session
                 stft_res = models[0].stft(mix_wave)
-                stft_res[:, :, :3, :] *= 0 
+                stft_res[:, :, :3, :] *= 0
                 res = _ort.run(None, {'input': stft_res.cpu().numpy()})[0]
                 ten = torch.tensor(res)
                 tar_waves = models[0].istft(ten.to(device))
                 tar_waves = tar_waves.cpu().detach().numpy()
                 
                 if window is not None:
-                    tar_waves[..., :chunk_size_actual] *= window 
+                    tar_waves[..., :chunk_size_actual] *= window
                     divider[..., start:end] += window
                 else:
                     divider[..., start:end] += 1
                 result[..., start:end] += tar_waves[..., :end-start]
-
-
+    
+    
     tar_waves = result / divider
     tar_waves_.append(tar_waves)
     tar_waves_ = np.vstack(tar_waves_)[:, :, trim:-trim]
     tar_waves = np.concatenate(tar_waves_, axis=-1)[:, :mix.shape[-1]]
     source = tar_waves[:,0:None]
-
+    
     return source
 
 def demix_vitlarge(model, mix, device):
     C = model.config.audio.hop_length * (2 * model.config.inference.dim_t - 1)
     N = options["overlap_VitLarge"]
     step = C // N
-
+    
     with torch.cuda.amp.autocast():
         with torch.no_grad():
             if model.config.training.target_instrument is not None:
                 req_shape = (1, ) + tuple(mix.shape)
             else:
                 req_shape = (len(model.config.training.instruments),) + tuple(mix.shape)
-
+            
             mix = mix.to(device)
             result = torch.zeros(req_shape, dtype=torch.float32).to(device)
             counter = torch.zeros(req_shape, dtype=torch.float32).to(device)
             i = 0
-
+            
             while i < mix.shape[1]:
                 part = mix[:, i:i + C]
                 length = part.shape[-1]
@@ -288,7 +283,7 @@ def demix_vitlarge(model, mix, device):
                 counter[..., i:i+length] += 1.
                 i += step
             estimated_sources = result / counter
-
+    
     if model.config.training.target_instrument is None:
         return {k: v for k, v in zip(model.config.training.instruments, estimated_sources.cpu().numpy())}
     else:
@@ -302,7 +297,7 @@ def demix_full_vitlarge(mix, device, model):
         bigshifts = options["BigShifts"]
     shift_in_samples = mix.shape[1] // bigshifts
     shifts = [x * shift_in_samples for x in range(bigshifts)]
-
+    
     results1 = []
     results2 = []
     
@@ -315,11 +310,11 @@ def demix_full_vitlarge(mix, device, model):
         restored_sources2 = np.concatenate((sources2[..., shift:], sources2[..., :shift]), axis=-1)
         results1.append(restored_sources1)
         results2.append(restored_sources2)
-
-
+    
+    
     sources1 = np.mean(results1, axis=0)
     sources2 = np.mean(results2, axis=0)
-
+    
     return sources1, sources2
 
 
@@ -331,7 +326,7 @@ class EnsembleDemucsMDXMusicSeparationModel:
         """
             options - user options
         """
-
+        
         if torch.cuda.is_available():
             device = 'cuda:0'
         else:
@@ -366,41 +361,41 @@ class EnsembleDemucsMDXMusicSeparationModel:
         model_vocals.to(device)
         self.model_vocals_only = model_vocals
         """
-
+        
         if options['vocals_only'] is False:
             self.models = []
             self.weights_vocals = np.array([10, 1, 8, 9])
             self.weights_bass = np.array([19, 4, 5, 8])
             self.weights_drums = np.array([18, 2, 4, 9])
             self.weights_other = np.array([14, 2, 5, 10])
-
+            
             model1 = pretrained.get_model('htdemucs_ft')
             model1.to(device)
             self.models.append(model1)
-
+            
             model2 = pretrained.get_model('htdemucs')
             model2.to(device)
             self.models.append(model2)
-
+            
             model3 = pretrained.get_model('htdemucs_6s')
             model3.to(device)
             self.models.append(model3)
-
+            
             model4 = pretrained.get_model('hdemucs_mmi')
             model4.to(device)
             self.models.append(model4)
-
+            
             if 0:
                 for model in self.models:
-                  pass
-                  # print(model.sources)
+                    pass
+                    # print(model.sources)
             '''
             ['drums', 'bass', 'other', 'vocals']
             ['drums', 'bass', 'other', 'vocals']
             ['drums', 'bass', 'other', 'vocals', 'guitar', 'piano']
             ['drums', 'bass', 'other', 'vocals']
             '''
-
+        
         if device == 'cpu':
             chunk_size = 200000000
             providers = ["CPUExecutionProvider"]
@@ -409,7 +404,7 @@ class EnsembleDemucsMDXMusicSeparationModel:
             providers = ["CUDAExecutionProvider"]
         if 'chunk_size' in options:
             chunk_size = int(options['chunk_size'])
-
+        
         #MDXv3 init
         print("Loading InstVoc into memory")
         remote_url_mdxv3 = 'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/MDX23C-8KFFT-InstVoc_HQ.ckpt'
@@ -418,16 +413,16 @@ class EnsembleDemucsMDXMusicSeparationModel:
             torch.hub.download_url_to_file(remote_url_mdxv3, model_folder+'MDX23C-8KFFT-InstVoc_HQ.ckpt')
         if not os.path.isfile(model_folder+'model_2_stem_full_band_8k.yaml'):
             torch.hub.download_url_to_file(remote_url_conf_mdxv3, model_folder+'model_2_stem_full_band_8k.yaml')
-
+        
         with open(model_folder + 'model_2_stem_full_band_8k.yaml') as f:
             config_mdxv3 = ConfigDict(yaml.load(f, Loader=yaml.FullLoader))
-
+        
         self.model_mdxv3 = TFC_TDF_net(config_mdxv3)
         self.model_mdxv3.load_state_dict(torch.load(model_folder+'MDX23C-8KFFT-InstVoc_HQ.ckpt'))
         self.device = torch.device(device)
         self.model_mdxv3 = self.model_mdxv3.to(device)
         self.model_mdxv3.eval()
-
+        
         #VitLarge init
         print("Loading VitLarge into memory")
         remote_url_vitlarge = 'https://github.com/ZFTurbo/Music-Source-Separation-Training/releases/download/v1.0.0/model_vocals_segm_models_sdr_9.77.ckpt'
@@ -436,16 +431,16 @@ class EnsembleDemucsMDXMusicSeparationModel:
             torch.hub.download_url_to_file(remote_url_vitlarge, model_folder+'model_vocals_segm_models_sdr_9.77.ckpt')
         if not os.path.isfile(model_folder+'config_vocals_segm_models.yaml'):
             torch.hub.download_url_to_file(remote_url_vl_conf, model_folder+'config_vocals_segm_models.yaml')
-
+        
         with open(model_folder + 'config_vocals_segm_models.yaml') as f:
             config_vl = ConfigDict(yaml.load(f, Loader=yaml.FullLoader))
-
+        
         self.model_vl = Segm_Models_Net(config_vl)
         self.model_vl.load_state_dict(torch.load(model_folder+'model_vocals_segm_models_sdr_9.77.ckpt'))
         self.device = torch.device(device)
         self.model_vl = self.model_vl.to(device)
         self.model_vl.eval()
-
+        
         # VOCFT init
         if options['use_VOCFT'] is True:
             print("Loading VOCFT into memory")
@@ -462,18 +457,18 @@ class EnsembleDemucsMDXMusicSeparationModel:
                 providers=providers,
                 provider_options=[{"device_id": 0}],
             )
-
+        
         self.device = device
         pass
-        
+    
     @property
     def instruments(self):
-
+        
         if options['vocals_only'] is False:
             return ['bass', 'drums', 'other', 'vocals']
         else:
             return ['vocals']
-
+    
     def raise_aicrowd_error(self, msg):
         """ Will be used by the evaluator to provide logs, DO NOT CHANGE """
         raise NameError(msg)
@@ -495,7 +490,7 @@ class EnsembleDemucsMDXMusicSeparationModel:
             separated_music_arrays: Dictionary numpy array of each separated instrument
             output_sample_rates: Dictionary of sample rates separated sequence
         """
-
+        
         # print('Update percent func: {}'.format(update_percent_func))
         
         separated_music_arrays = {}
@@ -503,7 +498,7 @@ class EnsembleDemucsMDXMusicSeparationModel:
         #print(mixed_sound_array.T.shape)
         #audio = np.expand_dims(mixed_sound_array.T, axis=0)
         audio = torch.from_numpy(mixed_sound_array.T).type('torch.FloatTensor').to(self.device)
-
+        
         overlap_demucs = self.overlap_demucs
         overlap_MDX = self.overlap_MDX
         shifts = 0
@@ -520,14 +515,14 @@ class EnsembleDemucsMDXMusicSeparationModel:
         model_vocals = model.cpu()
         del model_vocals
         """
-
+        
         print('Processing vocals with VitLarge model...')
         vocals4, instrum4 = demix_full_vitlarge(audio, self.device, self.model_vl)
         vocals4 = match_array_shapes(vocals4, mixed_sound_array.T)
         # print('Time: {:.0f} sec'.format(time() - start_time))
         # sf.write("/content/drive/MyDrive/output/vocals4.wav", vocals4.T, 44100)
         # sf.write("instrum4.wav", instrum4.T, 44100)
-
+        
         
         print('Processing vocals with MDXv3 InstVocHQ model...')
         sources3 = demix_full_mdx23c(mixed_sound_array.T, self.device, self.model_mdxv3)
@@ -539,13 +534,13 @@ class EnsembleDemucsMDXMusicSeparationModel:
             print('Processing vocals with UVR-MDX-VOC-FT...')
             overlap = overlap_MDX
             sources1 = 0.5 * demix_wrapper(
-              mixed_sound_array.T,
-              self.device,
-              self.mdx_models1,
-              self.infer_session1,
-              overlap=overlap,
-              bigshifts=options['BigShifts']//5
-          )
+                mixed_sound_array.T,
+                self.device,
+                self.mdx_models1,
+                self.infer_session1,
+                overlap=overlap,
+                bigshifts=options['BigShifts']//5
+            )
             sources1 += 0.5 * -demix_wrapper(
                 -mixed_sound_array.T,
                 self.device,
@@ -554,9 +549,9 @@ class EnsembleDemucsMDXMusicSeparationModel:
                 overlap=overlap,
                 bigshifts=options['BigShifts']//5
             )
-            vocals_mdxb1 = sources1 
+            vocals_mdxb1 = sources1
             # sf.write("vocals_mdxb1.wav", vocals_mdxb1.T, 44100)
-            
+        
         print('Processing vocals: DONE!')
         
         # Vocals Weighted Multiband Ensemble :
@@ -565,8 +560,8 @@ class EnsembleDemucsMDXMusicSeparationModel:
             vocals_low = lr_filter((weights[0] * vocals3.T + weights[1] * vocals4.T) / weights.sum(), 10000, 'lowpass') * 1.01055
             vocals_high = lr_filter(vocals3.T, 10000, 'highpass')
             vocals = vocals_low + vocals_high
-
-
+        
+        
         if options['use_VOCFT'] is True:
             weights = np.array([options["weight_VOCFT"], options["weight_InstVoc"], options["weight_VitLarge"]])
             vocals_low = lr_filter((weights[0] * vocals_mdxb1.T + weights[1] * vocals3.T + weights[2] * vocals4.T) / weights.sum(), 10000, 'lowpass') * 1.01055
@@ -581,7 +576,7 @@ class EnsembleDemucsMDXMusicSeparationModel:
             print('Starting Demucs processing...')
             audio = np.expand_dims(instrum.T, axis=0)
             audio = torch.from_numpy(audio).type('torch.FloatTensor').to(self.device)
-
+            
             all_outs = []
             print('Processing with htdemucs_ft...')
             i = 0
@@ -590,7 +585,7 @@ class EnsembleDemucsMDXMusicSeparationModel:
             model.to(self.device)
             out = 0.5 * apply_model(model, audio, shifts=shifts, overlap=overlap)[0].cpu().numpy() \
                   + 0.5 * -apply_model(model, -audio, shifts=shifts, overlap=overlap)[0].cpu().numpy()
-       
+            
             out[0] = self.weights_drums[i] * out[0]
             out[1] = self.weights_bass[i] * out[1]
             out[2] = self.weights_other[i] * out[2]
@@ -606,7 +601,7 @@ class EnsembleDemucsMDXMusicSeparationModel:
             model.to(self.device)
             out = 0.5 * apply_model(model, audio, shifts=shifts, overlap=overlap)[0].cpu().numpy() \
                   + 0.5 * -apply_model(model, -audio, shifts=shifts, overlap=overlap)[0].cpu().numpy()
-    
+            
             out[0] = self.weights_drums[i] * out[0]
             out[1] = self.weights_bass[i] * out[1]
             out[2] = self.weights_other[i] * out[2]
@@ -621,7 +616,7 @@ class EnsembleDemucsMDXMusicSeparationModel:
             model = pretrained.get_model('htdemucs_6s')
             model.to(self.device)
             out = apply_model(model, audio, shifts=shifts, overlap=overlap)[0].cpu().numpy()
-       
+            
             # More stems need to add
             out[2] = out[2] + out[4] + out[5]
             out = out[:4]
@@ -639,7 +634,7 @@ class EnsembleDemucsMDXMusicSeparationModel:
             model.to(self.device)
             out = 0.5 * apply_model(model, audio, shifts=shifts, overlap=overlap)[0].cpu().numpy() \
                   + 0.5 * -apply_model(model, -audio, shifts=shifts, overlap=overlap)[0].cpu().numpy()
-       
+            
             out[0] = self.weights_drums[i] * out[0]
             out[1] = self.weights_bass[i] * out[1]
             out[2] = self.weights_other[i] * out[2]
@@ -653,48 +648,48 @@ class EnsembleDemucsMDXMusicSeparationModel:
             out[1] = out[1] / self.weights_bass.sum()
             out[2] = out[2] / self.weights_other.sum()
             out[3] = out[3] / self.weights_vocals.sum()
-
+            
             # other
             res = mixed_sound_array - vocals - out[0].T - out[1].T
             res = np.clip(res, -1, 1)
             separated_music_arrays['other'] = (2 * res + out[2].T) / 3.0
             output_sample_rates['other'] = sample_rate
-    
+            
             # drums
             res = mixed_sound_array - vocals - out[1].T - out[2].T
             res = np.clip(res, -1, 1)
             separated_music_arrays['drums'] = (res + 2 * out[0].T.copy()) / 3.0
             output_sample_rates['drums'] = sample_rate
-    
+            
             # bass
             res = mixed_sound_array - vocals - out[0].T - out[2].T
             res = np.clip(res, -1, 1)
             separated_music_arrays['bass'] = (res + 2 * out[1].T) / 3.0
             output_sample_rates['bass'] = sample_rate
-    
+            
             bass = separated_music_arrays['bass']
             drums = separated_music_arrays['drums']
             other = separated_music_arrays['other']
-    
+            
             separated_music_arrays['other'] = mixed_sound_array - vocals - bass - drums
             separated_music_arrays['drums'] = mixed_sound_array - vocals - bass - other
             separated_music_arrays['bass'] = mixed_sound_array - vocals - drums - other
-            
-            
+        
+        
         # vocals
         separated_music_arrays['vocals'] = vocals
         output_sample_rates['vocals'] = sample_rate
         
         # instrum
         separated_music_arrays['instrum'] = instrum
-
+        
         return separated_music_arrays, output_sample_rates
 
 
 def predict_with_model(options):
-
+    
     output_format = options['output_format']
-
+    
     for input_audio in options['input_audio']:
         if not os.path.isfile(input_audio):
             print('Error. No such file: {}. Please check path!'.format(input_audio))
@@ -702,10 +697,10 @@ def predict_with_model(options):
     output_folder = options['output_folder']
     if not os.path.isdir(output_folder):
         os.mkdir(output_folder)
-
+    
     model = None
     model = EnsembleDemucsMDXMusicSeparationModel(options)
-
+    
     for i, input_audio in enumerate(options['input_audio']):
         print('Go for: {}'.format(input_audio))
         audio, sr = librosa.load(input_audio, mono=False, sr=44100)
@@ -717,7 +712,7 @@ def predict_with_model(options):
             output_name = os.path.splitext(os.path.basename(input_audio))[0] + '_{}.wav'.format(instrum)
             sf.write(output_folder + '/' + output_name, result[instrum], sample_rates[instrum], subtype=output_format)
             print('File created: {}'.format(output_folder + '/' + output_name))
-
+        
         # instrumental part 1
         # inst = (audio.T - result['vocals']) # * 1.002
         inst = result['instrum']
@@ -764,7 +759,7 @@ def md5(fname):
 
 def match_array_shapes(array_1:np.ndarray, array_2:np.ndarray):
     if array_1.shape[1] > array_2.shape[1]:
-        array_1 = array_1[:,:array_2.shape[1]] 
+        array_1 = array_1[:,:array_2.shape[1]]
     elif array_1.shape[1] < array_2.shape[1]:
         padding = array_2.shape[1] - array_1.shape[1]
         array_1 = np.pad(array_1, ((0,0), (0,padding)), 'constant', constant_values=0)
@@ -793,12 +788,12 @@ if __name__ == '__main__':
     
     options = m.parse_args().__dict__
     print("Options: ")
-
+    
     print(f'BigShifts: {options["BigShifts"]}\n')
-
+    
     print(f'weight_InstVoc: {options["weight_InstVoc"]}')
     print(f'weight_VitLarge: {options["weight_VitLarge"]}\n')
-
+    
     print(f'overlap_InstVoc: {options["overlap_InstVoc"]}')
     print(f'overlap_VitLarge: {options["overlap_VitLarge"]}\n')
     
@@ -806,13 +801,45 @@ if __name__ == '__main__':
     if options["use_VOCFT"] is True:
         print(f'overlap_VOCFT: {options["overlap_VOCFT"]}')
         print(f'weight_VOCFT: {options["weight_VOCFT"]}\n')
-
+    
     print(f'vocals_only: {options["vocals_only"]}')
     
     if options["vocals_only"] is False:
         print(f'overlap_demucs: {options["overlap_demucs"]}\n')
-
+    
     print(f'output_format: {options["output_format"]}\n')
     predict_with_model(options)
     print('Time: {:.0f} sec'.format(time() - start_time))
-    
+
+def separate(
+        input_audio,
+        output_folder,
+        overlap_demucs = 0.1,
+        overlap_VOCFT = 0.1,
+        overlap_VitLarge = 1,
+        overlap_InstVoc = 1,
+        weight_InstVoc = 8,
+        weight_VOCFT = 1,
+        weight_VitLarge = 5,
+        BigShifts = 7,
+        vocals_only = False,
+        use_VOCFT = False,
+        output_format = "FLOAT"
+):
+    global options
+    options = {
+        "input_audio": input_audio,
+        "output_folder": output_folder,
+        "overlap_demucs": overlap_demucs,
+        "overlap_VOCFT": overlap_VOCFT,
+        "overlap_VitLarge": overlap_VitLarge,
+        "overlap_InstVoc": overlap_InstVoc,
+        "weight_InstVoc": weight_InstVoc,
+        "weight_VOCFT": weight_VOCFT,
+        "weight_VitLarge": weight_VitLarge,
+        "BigShifts": BigShifts,
+        "vocals_only": vocals_only,
+        "use_VOCFT": use_VOCFT,
+        "output_format": output_format
+    }
+    predict_with_model(options)
