@@ -27,9 +27,9 @@ from scipy import signal
 import gc
 import yaml
 from ml_collections import ConfigDict
-from modules.tfc_tdf_v3 import TFC_TDF_net
+from .modules.tfc_tdf_v3 import TFC_TDF_net
 from scipy.signal import resample_poly
-from modules.segm_models import Segm_Models_Net
+from .modules.segm_models import Segm_Models_Net
 
 
 class Conv_TDF_net_trim_model(nn.Module):
