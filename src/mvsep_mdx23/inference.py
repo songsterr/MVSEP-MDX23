@@ -15,31 +15,22 @@ import numpy as np
 import torch
 import torch.nn as nn
 import os
-import argparse
 import soundfile as sf
-from demucs.states import load_model
 from demucs import pretrained
 from demucs.apply import apply_model
 import onnxruntime as ort
 from time import time
 import librosa
-import hashlib
 from scipy import signal
 import gc
 import yaml
 from ml_collections import ConfigDict
-import sys
-import math
-import pathlib
-import warnings
-from scipy.signal import resample_poly
 
-from modules.tfc_tdf_v2 import Conv_TDF_net_trim_model
-from modules.tfc_tdf_v3 import TFC_TDF_net, STFT
-from modules.segm_models import Segm_Models_Net
-from modules.bs_roformer import BSRoformer
-from modules.bs_roformer import MelBandRoformer
-
+from .modules.tfc_tdf_v2 import Conv_TDF_net_trim_model
+from .modules.tfc_tdf_v3 import TFC_TDF_net
+from .modules.segm_models import Segm_Models_Net
+from .modules.bs_roformer.bs_roformer import BSRoformer
+from .modules.bs_roformer.mel_band_roformer import MelBandRoformer
 
 
 def get_models(name, device, load=True, vocals_model_type=0):
@@ -943,73 +934,69 @@ def dBgain(audio, volume_gain_dB):
     return gained_audio
 
 
-
-if __name__ == '__main__':
-    start_time = time()
-    print("started!\n")
-    m = argparse.ArgumentParser()
-    m.add_argument("--input_audio", "-i", nargs='+', type=str, help="Input audio location. You can provide multiple files at once", required=True)
-    m.add_argument("--output_folder", "-r", type=str, help="Output audio folder", required=True)
-    m.add_argument("--large_gpu", action='store_true', help="It will store all models on GPU for faster processing of multiple audio files. Requires 11 and more GB of free GPU memory.")
-    m.add_argument("--single_onnx", action='store_true', help="Only use single ONNX model for vocals. Can be useful if you have not enough GPU memory.")
-    m.add_argument("--cpu", action='store_true', help="Choose CPU instead of GPU for processing. Can be very slow.")
-    m.add_argument("--overlap_demucs", type=float, help="Overlap of splited audio for light models. Closer to 1.0 - slower", required=False, default=0.1)
-    m.add_argument("--overlap_VOCFT", type=float, help="Overlap of splited audio for heavy models. Closer to 1.0 - slower", required=False, default=0.1)
-    m.add_argument("--overlap_InstHQ4", type=float, help="Overlap of splited audio for heavy models. Closer to 1.0 - slower", required=False, default=0.1)
-    m.add_argument("--overlap_VitLarge", type=int, help="Overlap of splited audio for heavy models. Closer to 1.0 - slower", required=False, default=1)
-    m.add_argument("--overlap_InstVoc", type=int, help="MDXv3 overlap", required=False, default=2)
-    m.add_argument("--overlap_BSRoformer", type=int, help="BSRoformer overlap", required=False, default=2)
-    m.add_argument("--weight_InstVoc", type=float, help="Weight of MDXv3 model", required=False, default=3)
-    m.add_argument("--weight_VOCFT", type=float, help="Weight of VOC-FT model", required=False, default=1)
-    m.add_argument("--weight_InstHQ4", type=float, help="Weight of instHQ4 model", required=False, default=1)
-    m.add_argument("--weight_VitLarge", type=float, help="Weight of VitLarge model", required=False, default=1)
-    m.add_argument("--weight_BSRoformer", type=float, help="Weight of BS-Roformer model", required=False, default=8)
-    m.add_argument("--weight_Kim_MelRoformer", type=float, help="Weight of Kim_MelRoformer model", required=False, default=10)
-    m.add_argument("--BigShifts", type=int, help="Managing MDX 'BigShifts' trick value.", required=False, default=3)
-    m.add_argument("--vocals_only",  action='store_true', help="Vocals + instrumental only")
-    m.add_argument("--use_BSRoformer", action='store_true', help="use BSRoformer in vocal ensemble")
-    m.add_argument("--use_Kim_MelRoformer", action='store_true', help="use Kim MelBand Roformer in vocal ensemble")
-    
-    m.add_argument("--BSRoformer_model", type=str, help="Which checkpoint to use", required=False, default="ep_317_1297")
-    m.add_argument("--use_InstVoc", action='store_true', help="use instVoc in vocal ensemble")
-    m.add_argument("--use_VitLarge", action='store_true', help="use VitLarge in vocal ensemble")
-    m.add_argument("--use_InstHQ4", action='store_true', help="use InstHQ4 in vocal ensemble")
-    m.add_argument("--use_VOCFT", action='store_true', help="use VOCFT in vocal ensemble")
-    m.add_argument("--output_format", type=str, help="Output audio folder", default="PCM_16")
-    m.add_argument("--input_gain", type=int, help="input volume gain", required=False, default=0)
-    m.add_argument("--restore_gain", action='store_true', help="restore original gain after separation")
-    m.add_argument("--filter_vocals", action='store_true', help="Remove audio below 50hz in vocals stem")
-    options = m.parse_args().__dict__
-    print("Options: ")
-
-    print(f'Input Gain: {options["input_gain"]}dB')
-    print(f'Restore Gain: {options["restore_gain"]}')
-    print(f'BigShifts: {options["BigShifts"]}\n')
-
-    print(f'BSRoformer_model: {options["BSRoformer_model"]}')
-    print(f'weight_BSRoformer: {options["weight_BSRoformer"]}')
-    print(f'weight_InstVoc: {options["weight_InstVoc"]}\n')
-
-    print(f'use_VitLarge: {options["use_VitLarge"]}')
-    if options["use_VitLarge"] is True:    
-       print(f'weight_VitLarge: {options["weight_VitLarge"]}\n')
-    
-    print(f'use_VOCFT: {options["use_VOCFT"]}')
-    if options["use_VOCFT"] is True:
-        print(f'overlap_VOCFT: {options["overlap_VOCFT"]}')
-        print(f'weight_VOCFT: {options["weight_VOCFT"]}\n')
-        
-    print(f'use_InstHQ4: {options["use_InstHQ4"]}')
-    if options["use_InstHQ4"] is True:
-        print(f'overlap_InstHQ4: {options["overlap_InstHQ4"]}')
-        print(f'weight_InstHQ4: {options["weight_InstHQ4"]}\n')
-
-    print(f'vocals_only: {options["vocals_only"]}')
-    
-    if options["vocals_only"] is False:
-        print(f'overlap_demucs: {options["overlap_demucs"]}\n')
-
-    print(f'output_format: {options["output_format"]}\n')
+def separate(
+        input_audio,
+        output_folder,
+        large_gpu = False,
+        single_onnx = False,
+        overlap_demucs = 0.1,
+        overlap_VOCFT = 0.1,
+        overlap_InstHQ4 = 0.1,
+        overlap_VitLarge = 1,
+        overlap_InstVoc = 2,
+        overlap_BSRoformer = 2,
+        weight_InstVoc = 3,
+        weight_VOCFT = 1,
+        weight_InstHQ4 = 1,
+        weight_VitLarge = 1,
+        weight_BSRoformer = 8,
+        weight_Kim_MelRoformer = 10,
+        BigShifts = 3,
+        vocals_only = False,
+        use_InstVoc = False,
+        use_VitLarge = False,
+        use_InstHQ4 = False,
+        use_BSRoformer = False,
+        use_Kim_MelRoformer = False,
+        BSRoformer_model = 'ep_317_1297',
+        use_VOCFT = False,
+        output_format = "FLOAT",
+        chunk_size = 1000000,
+        input_gain = 0,
+        restore_gain = False,
+        filter_vocals = False
+):
+    global options
+    options = {
+        "input_audio": input_audio,
+        "output_folder": output_folder,
+        "large_gpu": large_gpu,
+        "single_onnx": single_onnx,
+        "overlap_demucs": overlap_demucs,
+        "overlap_VOCFT": overlap_VOCFT,
+        "overlap_InstHQ4": overlap_InstHQ4,
+        "overlap_VitLarge": overlap_VitLarge,
+        "overlap_InstVoc": overlap_InstVoc,
+        "overlap_BSRoformer": overlap_BSRoformer,
+        "weight_InstVoc": weight_InstVoc,
+        "weight_VOCFT": weight_VOCFT,
+        "weight_InstHQ4": weight_InstHQ4,
+        "weight_VitLarge": weight_VitLarge,
+        "weight_BSRoformer": weight_BSRoformer,
+        "weight_Kim_MelRoformer": weight_Kim_MelRoformer,
+        "BigShifts": BigShifts,
+        "vocals_only": vocals_only,
+        "use_InstVoc": use_InstVoc,
+        "use_VitLarge": use_VitLarge,
+        "use_InstHQ4": use_InstHQ4,
+        "use_BSRoformer": use_BSRoformer,
+        "use_Kim_MelRoformer": use_Kim_MelRoformer,
+        "use_VOCFT": use_VOCFT,
+        "BSRoformer_model": BSRoformer_model,
+        "output_format": output_format,
+        "chunk_size": chunk_size,
+        "input_gain": input_gain,
+        "restore_gain": restore_gain,
+        "filter_vocals": filter_vocals,
+    }
     predict_with_model(options)
-    print('Time: {:.0f} sec'.format(time() - start_time))
-
