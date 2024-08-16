@@ -1,7 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from functools import partial
 
 
 class Conv_TDF_net_trim_model(nn.Module):
