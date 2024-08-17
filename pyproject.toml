@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "MVSEP-MDX23"
-version = "2.0.7"
+version = "2.0.8"
 description = "Music separation model. Forked from https://github.com/jarredou/MVSEP-MDX23-Colab_v2"
 dependencies = [
     "numpy",
@@ -27,6 +27,3 @@ dependencies = [
 where = ["src"]
 include = ["*"]
 exclude = []
-
-[tool.setuptools.package-data]
-'src.mvsep_mdx23.models' = ['*.yaml']

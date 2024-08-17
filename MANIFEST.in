@@ -1,1 +1,1 @@
-recursive-include src/mvsep_mdx23/models
+recursive-include src/mvsep_mdx23/models *.yaml
